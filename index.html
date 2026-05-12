@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>Arctic Ice Simulator</title>
+	<link href="https://fonts.googleapis.com/css2?family=Fredoka+One&display=swap" rel="stylesheet" />
+	<style>
+		* {
+			margin: 0;
+			padding: 0;
+			box-sizing: border-box;
+		}
+
+		html,
+		body {
+			width: 100%;
+			height: 100%;
+			overflow: hidden;
+			background: #0a1e30;
+		}
+
+		.wrap {
+			display: flex;
+			flex-direction: column;
+			width: 100vw;
+			height: 100vh;
+		}
+
+		.scene {
+			flex: 1;
+			width: 100%;
+			min-height: 0;
+			position: relative;
+		}
+
+		canvas {
+			display: block;
+			width: 100%;
+			height: 100%;
+			image-rendering: auto;
+		}
+
+		.bottom {
+			flex-shrink: 0;
+			padding: 12px 32px 16px;
+			background: linear-gradient(to bottom, rgba(5, 15, 28, 0.92), rgba(5, 15, 28, 0.98));
+			border-top: 1px solid rgba(100, 180, 220, 0.15);
+			display: flex;
+			flex-direction: column;
+			gap: 8px;
+		}
+
+		.sldr-lbls {
+			display: flex;
+			justify-content: space-between;
+			font-family: 'Fredoka One', cursive;
+			font-size: clamp(13px, 2vw, 17px);
+			color: white;
+		}
+
+		input[type=range] {
+			width: 100%;
+			-webkit-appearance: none;
+			height: 10px;
+			border-radius: 10px;
+			background: linear-gradient(to right, #b0eaff, #ff6030);
+			outline: none;
+			cursor: pointer;
+		}
+
+		input[type=range]::-webkit-slider-thumb {
+			-webkit-appearance: none;
+			width: 28px;
+			height: 28px;
+			border-radius: 50%;
+			background: white;
+			border: 3px solid #4ab0d4;
+			cursor: pointer;
+			box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+		}
+
+		.status {
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			gap: 8px;
+			font-family: 'Fredoka One', cursive;
+			font-size: clamp(14px, 2vw, 18px);
+			color: white;
+		}
+	</style>
+</head>
+
+<body>
+	<div class="wrap">
+		<div class="scene"><canvas id="c"></canvas></div>
+		<div class="bottom">
+			<div class="sldr-lbls"><span>❄️ Healthy Ice</span><span>🔥 Melting Ice</span></div>
+			<input type="range" id="sl" min="0" max="100" value="10" step="1" />
+			<div class="status"><span id="sEmoji">🐻‍❄️</span><span id="sTxt">The Arctic is healthy — polar bears are
+					happy!</span></div>
+		</div>
+	</div>
+	<script>
+		/* ═══════════════════════════════════════════════
+			ARCTIC ICE CLIMATE SIMULATOR
+			Fully pre-rendered, high-DPR canvas
+		═══════════════════════════════════════════════ */
+		const canvas = document.getElementById('c');
+		const ctx = canvas.getContext('2d');
+		const sl = document.getElementById('sl');
+		let W = 0, H = 0, DPR = 1;
+
+		/* ── math helpers ── */
+		const lerp = (a, b, t) => a + (b - a) * t;
+		const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+		const smoothstep = (a, b, t) => { t = clamp((t - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+
+		/* ── seeded PRNG (mulberry32) ── */
+		function rngFactory(seed) {
+			let s = seed >>> 0;
+			return function () {
+				s += 0x6D2B79F5; let t = Math.imul(s ^ s >>> 15, 1 | s);
+				t ^= t + Math.imul(t ^ t >>> 7, 61 | t);
+				return ((t ^ t >>> 14) >>> 0) / 4294967296;
+			};
+		}
+
+		/* ═══════════════════════════════════════════════
+			VALUE NOISE  (for realistic textures)
+		═══════════════════════════════════════════════ */
+		function makeNoise2D(seed) {
+			const rng = rngFactory(seed);
+			const SIZE = 256;
+			const table = new Float32Array(SIZE * SIZE);
+			for (let i = 0; i < table.length; i++) table[i] = rng();
+			function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+			function at(ix, iy) { return table[((iy & (SIZE - 1)) * SIZE) + (ix & (SIZE - 1))]; }
+			return function (x, y) {
+				const ix = Math.floor(x) & (SIZE - 1), iy = Math.floor(y) & (SIZE - 1);
+				const fx = x - Math.floor(x), fy = y - Math.floor(y);
+				const ux = fade(fx), uy = fade(fy);
+				const a = lerp(at(ix, iy), at(ix + 1, iy), ux);
+				const b = lerp(at(ix, iy + 1), at(ix + 1, iy + 1), ux);
+				return lerp(a, b, uy);
+			};
+		}
+
+		/* fractal noise (octaves) */
+		function fbm(noise, x, y, octaves, lacunarity, gain) {
+			let v = 0, amp = 0.5, freq = 1, max = 0;
+			for (let i = 0; i < octaves; i++) {
+				v += noise(x * freq, y * freq) * amp;
+				max += amp; amp *= gain; freq *= lacunarity;
+			}
+			return v / max;
+		}
+
+		/* ═══════════════════════════════════════════════
+			PRE-RENDERED TEXTURE CANVASES
+		═══════════════════════════════════════════════ */
+		let bgWaterCanvas = null, bgIceCanvas = null;
+
+		function buildWaterTexture(w, h) {
+			const oc = document.createElement('canvas'); oc.width = w; oc.height = h;
+			const oc2 = oc.getContext('2d');
+			const noise1 = makeNoise2D(1234);
+			const noise2 = makeNoise2D(5678);
+			const id = oc2.createImageData(w, h);
+			const d = id.data;
+			const scale = 3.5 / Math.min(w, h) * 100;
+			for (let y = 0; y < h; y++) {
+				for (let x = 0; x < w; x++) {
+					const nx = x * scale, ny = y * scale;
+					const n = fbm(noise1, nx, ny, 6, 2.0, 0.5);
+					const n2 = fbm(noise2, nx * 0.7 + 40, ny * 0.7 + 40, 4, 2.0, 0.5);
+					/* deep arctic water: dark teal-blue with subtle variation */
+					const base = n * 0.6 + n2 * 0.4;
+					const r = Math.round(lerp(12, 38, base));
+					const g = Math.round(lerp(48, 95, base));
+					const b = Math.round(lerp(85, 148, base));
+					const i4 = (y * w + x) * 4;
+					d[i4] = r; d[i4 + 1] = g; d[i4 + 2] = b; d[i4 + 3] = 255;
+				}
+			}
+			oc2.putImageData(id, 0, 0);
+
+			/* water surface caustic shimmer lines */
+			oc2.save();
+			for (let i = 0; i < 120; i++) {
+				const rng = rngFactory(i * 97 + 3);
+				const wx = rng() * w, wy = rng() * h;
+				const len = (20 + rng() * 120) * (Math.min(w, h) / 1200);
+				const angle = rng() * Math.PI * 2;
+				const alpha = 0.04 + rng() * 0.10;
+				const grd = oc2.createLinearGradient(wx, wy, wx + Math.cos(angle) * len, wy + Math.sin(angle) * len);
+				grd.addColorStop(0, 'rgba(120,200,240,0)');
+				grd.addColorStop(0.5, `rgba(140,210,250,${alpha})`);
+				grd.addColorStop(1, 'rgba(120,200,240,0)');
+				oc2.strokeStyle = grd;
+				oc2.lineWidth = 0.8 + rng() * 1.5;
+				oc2.beginPath(); oc2.moveTo(wx, wy);
+				oc2.lineTo(wx + Math.cos(angle) * len, wy + Math.sin(angle) * len);
+				oc2.stroke();
+			}
+			oc2.restore();
+			return oc;
+		}
+
+		function buildIceTexture(w, h) {
+			const oc = document.createElement('canvas'); oc.width = w; oc.height = h;
+			const oc2 = oc.getContext('2d');
+			const noise1 = makeNoise2D(9999);
+			const noise2 = makeNoise2D(1111);
+			const noise3 = makeNoise2D(3333);
+			const id = oc2.createImageData(w, h);
+			const d = id.data;
+			const scale = 4.0 / Math.min(w, h) * 100;
+			for (let y = 0; y < h; y++) {
+				for (let x = 0; x < w; x++) {
+					const nx = x * scale, ny = y * scale;
+					const n1 = fbm(noise1, nx, ny, 6, 2.0, 0.5);
+					const n2 = fbm(noise2, nx * 1.5 + 10, ny * 1.5 + 10, 5, 2.2, 0.45);
+					const n3 = noise3(nx * 0.4, ny * 0.4);
+					/* blue-white ice with depth variation */
+					const base = n1 * 0.5 + n2 * 0.35 + n3 * 0.15;
+					const shadow = fbm(noise2, nx * 3, ny * 3, 3, 2, 0.5);
+					const r = Math.round(lerp(190, 252, base) - shadow * 18);
+					const g = Math.round(lerp(210, 255, base) - shadow * 12);
+					const b = Math.round(lerp(225, 255, base) - shadow * 6);
+					const i4 = (y * w + x) * 4;
+					d[i4] = clamp(r, 0, 255); d[i4 + 1] = clamp(g, 0, 255); d[i4 + 2] = clamp(b, 0, 255); d[i4 + 3] = 255;
+				}
+			}
+			oc2.putImageData(id, 0, 0);
+			return oc;
+		}
+
+		/* ═══════════════════════════════════════════════
+			SCENE GEOMETRY
+		═══════════════════════════════════════════════ */
+		let iceSheets = [], floatChunks = [], tinyDots = [];
+
+		function buildPolygon(cx, cy, baseR, rng, count, irregularity) {
+			const pts = [];
+			for (let k = 0; k < count; k++) {
+				const a = (k / count) * Math.PI * 2 + (rng() - 0.5) * irregularity;
+				const r = baseR * (0.55 + rng() * 0.45);
+				pts.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]);
+			}
+			return pts;
+		}
+
+		function generateScene() {
+			iceSheets = []; floatChunks = []; tinyDots = [];
+
+			/* 4 corner sheets + 1 per edge midpoint for denser feel */
+			const anchors = [
+				{ cx: 0, cy: 0, seed: 100 },
+				{ cx: W, cy: 0, seed: 200 },
+				{ cx: 0, cy: H, seed: 300 },
+				{ cx: W, cy: H, seed: 400 },
+				{ cx: W * 0.5, cy: 0, seed: 500, partial: true, scale: 0.62 },
+				{ cx: 0, cy: H * 0.5, seed: 600, partial: true, scale: 0.62 },
+				{ cx: W, cy: H * 0.5, seed: 700, partial: true, scale: 0.62 },
+				{ cx: W * 0.5, cy: H, seed: 800, partial: true, scale: 0.62 },
+			];
+
+			anchors.forEach(function (a) {
+				const rng = rngFactory(a.seed);
+				const baseR = Math.min(W, H) * (a.partial ? 0.30 : 0.46) * (a.scale || 1);
+				const count = 14 + Math.floor(rng() * 6);
+				const pts = buildPolygon(a.cx, a.cy, baseR, rng, count, 0.35);
+				const cracks = [];
+				const nCracks = 12 + Math.floor(rng() * 8);
+				for (let n = 0; n < nCracks; n++) {
+					const r2 = rngFactory(a.seed * 10 + n * 41);
+					const a0 = r2() * Math.PI * 2;
+					const r0 = r2() * baseR * 0.7;
+					const sx = a.cx + Math.cos(a0) * r0, sy = a.cy + Math.sin(a0) * r0;
+					const segs = []; let lx = sx, ly = sy;
+					const ns = 4 + Math.floor(r2() * 5);
+					for (let s = 0; s < ns; s++) {
+						const ang = a0 + (r2() - 0.5) * 2.6;
+						const len = (8 + r2() * 50) * (Math.min(W, H) / 1000);
+						lx += Math.cos(ang) * len; ly += Math.sin(ang) * len;
+						segs.push([lx, ly]);
+					}
+					cracks.push({ sx, sy, segs, w: 0.5 + r2() * 1.5 });
+				}
+				iceSheets.push({ pts, cx: a.cx, cy: a.cy, baseR, cracks });
+			});
+
+			/* floating chunks */
+			for (let i = 0; i < 48; i++) {
+				const rng = rngFactory(i * 53 + 19);
+				const cx = W * 0.05 + rng() * W * 0.90;
+				const cy = H * 0.05 + rng() * H * 0.90;
+				const sz = (0.008 + rng() * 0.052) * Math.min(W, H);
+				const sides = 5 + Math.floor(rng() * 4);
+				const pts = buildPolygon(cx, cy, sz, rng, sides, 0.55);
+				floatChunks.push({ cx, cy, pts, sz, seed: rng(), layer: rng() });
+			}
+
+			/* tiny dots */
+			for (let i = 0; i < 100; i++) {
+				const rng = rngFactory(i * 29 + 7);
+				tinyDots.push({ x: W * 0.02 + rng() * W * 0.96, y: H * 0.02 + rng() * H * 0.96, r: 1.5 + rng() * 4.5, seed: rng() });
+			}
+		}
+
+		/* ═══════════════════════════════════════════════
+			DRAWING ROUTINES
+		═══════════════════════════════════════════════ */
+		function drawSheet(sheet, ice, waterTex, iceTex) {
+			const scale = clamp(ice * 1.65 - 0.06, 0, 1);
+			if (scale <= 0.01) return;
+			const { pts, cx, cy, cracks } = sheet;
+			const S = Math.min(W, H);
+
+			ctx.save();
+			ctx.translate(cx, cy); ctx.scale(scale, scale); ctx.translate(-cx, -cy);
+
+			/* clip path */
+			ctx.beginPath();
+			ctx.moveTo(pts[0][0], pts[0][1]);
+			for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+			ctx.closePath();
+			ctx.save(); ctx.clip();
+
+			/* ice texture fill */
+			if (iceTex) {
+				ctx.drawImage(iceTex, 0, 0, W, H);
+			} else {
+				const bv = Math.round(lerp(215, 248, ice));
+				ctx.fillStyle = `rgb(${bv},${bv + 6},${bv + 10})`; ctx.fillRect(0, 0, W, H);
+			}
+
+			/* subtle radial darkening towards edges */
+			const grd = ctx.createRadialGradient(cx, cy, 0, cx, cy, sheet.baseR * scale);
+			grd.addColorStop(0, 'rgba(255,255,255,0.18)');
+			grd.addColorStop(0.6, 'rgba(255,255,255,0)');
+			grd.addColorStop(1, 'rgba(30,80,130,0.22)');
+			ctx.fillStyle = grd; ctx.fillRect(0, 0, W, H);
+
+			ctx.restore(); /* unclip */
+
+			/* shadow cast on water (offset shape) */
+			ctx.save();
+			ctx.translate(S * 0.006, S * 0.006);
+			ctx.beginPath();
+			ctx.moveTo(pts[0][0], pts[0][1]);
+			for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+			ctx.closePath();
+			ctx.fillStyle = 'rgba(10,40,80,0.18)';
+			/* draw shadow BELOW sheet so we paint it before edge outline */
+			ctx.restore();
+
+			/* blue-shadow rim */
+			ctx.beginPath();
+			ctx.moveTo(pts[0][0], pts[0][1]);
+			for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+			ctx.closePath();
+			ctx.strokeStyle = 'rgba(100,170,215,0.50)';
+			ctx.lineWidth = clamp(S * 0.004, 1.5, 5);
+			ctx.stroke();
+			ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+			ctx.lineWidth = clamp(S * 0.002, 0.8, 2.5);
+			ctx.stroke();
+
+			/* crack lines — painted on top */
+			cracks.forEach(function (cr) {
+				ctx.beginPath(); ctx.moveTo(cr.sx, cr.sy);
+				cr.segs.forEach(function (p) { ctx.lineTo(p[0], p[1]); });
+				ctx.strokeStyle = `rgba(100,160,205,${0.30 + ice * 0.28})`;
+				ctx.lineWidth = clamp(cr.w * (S / 1000), 0.5, 2.0);
+				ctx.stroke();
+				/* bright glint on crack */
+				ctx.strokeStyle = `rgba(200,230,245,${0.12 + ice * 0.14})`;
+				ctx.lineWidth = clamp(cr.w * 0.4 * (S / 1000), 0.3, 1.0);
+				ctx.stroke();
+			});
+
+			ctx.restore();
+		}
+
+		function drawChunk(chunk, ice, iceTex) {
+			const vis = ice - 0.09; if (vis <= 0) return;
+			const alpha = clamp(vis * 4, 0, 1) * (0.70 + chunk.seed * 0.30);
+			const S = Math.min(W, H);
+
+			ctx.save(); ctx.globalAlpha = alpha;
+
+			/* shadow offset */
+			ctx.save();
+			ctx.translate(chunk.sz * 0.14, chunk.sz * 0.14);
+			ctx.beginPath();
+			ctx.moveTo(chunk.pts[0][0], chunk.pts[0][1]);
+			for (let i = 1; i < chunk.pts.length; i++) ctx.lineTo(chunk.pts[i][0], chunk.pts[i][1]);
+			ctx.closePath();
+			ctx.fillStyle = 'rgba(8,35,75,0.28)'; ctx.fill();
+			ctx.restore();
+
+			/* clip & texture */
+			ctx.beginPath();
+			ctx.moveTo(chunk.pts[0][0], chunk.pts[0][1]);
+			for (let i = 1; i < chunk.pts.length; i++) ctx.lineTo(chunk.pts[i][0], chunk.pts[i][1]);
+			ctx.closePath();
+			ctx.save(); ctx.clip();
+			if (iceTex) {
+				/* offset texture so each chunk looks different */
+				ctx.drawImage(iceTex, -chunk.cx * 0.3, -chunk.cy * 0.3, W * 1.3, H * 1.3);
+			} else {
+				const bv = Math.round(lerp(210, 248, ice));
+				ctx.fillStyle = `rgb(${bv},${bv + 6},${bv + 11})`; ctx.fillRect(0, 0, W, H);
+			}
+			/* radial highlight */
+			const gr = ctx.createRadialGradient(chunk.cx, chunk.cy, 0, chunk.cx, chunk.cy, chunk.sz);
+			gr.addColorStop(0, 'rgba(255,255,255,0.30)');
+			gr.addColorStop(0.5, 'rgba(255,255,255,0.05)');
+			gr.addColorStop(1, 'rgba(40,100,160,0.20)');
+			ctx.fillStyle = gr; ctx.fillRect(0, 0, W, H);
+			ctx.restore();
+
+			/* outline */
+			ctx.beginPath();
+			ctx.moveTo(chunk.pts[0][0], chunk.pts[0][1]);
+			for (let i = 1; i < chunk.pts.length; i++) ctx.lineTo(chunk.pts[i][0], chunk.pts[i][1]);
+			ctx.closePath();
+			ctx.strokeStyle = 'rgba(110,175,218,0.50)';
+			ctx.lineWidth = clamp(S * 0.003, 1, 3); ctx.stroke();
+			ctx.strokeStyle = 'rgba(255,255,255,0.30)';
+			ctx.lineWidth = clamp(S * 0.0015, 0.5, 1.5); ctx.stroke();
+
+			ctx.restore();
+		}
+
+		function drawDot(dot, ice) {
+			const vis = ice - 0.06; if (vis <= 0) return;
+			const alpha = clamp(vis * 5, 0, 1) * (0.45 + dot.seed * 0.55);
+			ctx.save(); ctx.globalAlpha = alpha;
+			/* shadow */
+			ctx.beginPath(); ctx.arc(dot.x + dot.r * 0.4, dot.y + dot.r * 0.4, dot.r, 0, Math.PI * 2);
+			ctx.fillStyle = 'rgba(8,35,75,0.22)'; ctx.fill();
+			/* body */
+			ctx.beginPath(); ctx.arc(dot.x, dot.y, dot.r, 0, Math.PI * 2);
+			const gr = ctx.createRadialGradient(dot.x - dot.r * 0.3, dot.y - dot.r * 0.3, 0, dot.x, dot.y, dot.r);
+			gr.addColorStop(0, 'rgba(240,252,255,1)');
+			gr.addColorStop(1, 'rgba(180,220,242,1)');
+			ctx.fillStyle = gr; ctx.fill();
+			ctx.strokeStyle = 'rgba(110,175,218,0.40)';
+			ctx.lineWidth = 0.6; ctx.stroke();
+			ctx.restore();
+		}
+
+		/* ═══════════════════════════════════════════════
+			BEAR
+			Origin: (cx, feetY) — feet sit exactly here.
+			R = body half-width (all measurements derived from R).
+		═══════════════════════════════════════════════ */
+		function drawBear(cx, feetY, R, state) {
+			const c = ctx;
+			c.save();
+
+			const bodyRX = R;
+			const bodyRY = R * 0.85;
+			const bodyCY = feetY - R * 0.9;          // body ellipse center
+			const headR = R * 0.75;
+			const headCY = bodyCY - bodyRY - headR + R * 0.3; // head overlaps body top
+			const earR = R * 0.28;
+			const earCY = headCY - R * 0.55;
+			const muzzCY = headCY + headR * 0.35;
+			const eyeY = headCY - headR * 0.18;
+			const eyeOX = headR * 0.38;
+			const eyeR = headR * 0.28;
+			const browY = eyeY - eyeR * 1.3;
+
+			/* ── ears (behind everything) ── */
+			[cx - R * 0.55, cx + R * 0.55].forEach(function (ex) {
+				c.fillStyle = 'white'; c.strokeStyle = '#555'; c.lineWidth = R * 0.07;
+				c.beginPath(); c.arc(ex, earCY, earR, 0, Math.PI * 2); c.fill(); c.stroke();
+				c.fillStyle = '#f5ccd2'; c.strokeStyle = 'none';
+				c.beginPath(); c.arc(ex, earCY, earR * 0.55, 0, Math.PI * 2); c.fill();
+			});
+
+			/* ── 2 legs (behind body) ── */
+			const legW = R * 0.38, legH = R * 0.55, legY = feetY - legH;
+			c.fillStyle = 'white'; c.strokeStyle = '#555'; c.lineWidth = R * 0.07;
+			[-R * 0.32, R * 0.32].forEach(function (lx) {
+				c.beginPath(); c.roundRect(cx + lx - legW / 2, legY, legW, legH, legW / 2);
+				c.fill(); c.stroke();
+				// foot
+				c.beginPath(); c.ellipse(cx + lx, feetY, legW * 0.72, legW * 0.42, 0, 0, Math.PI * 2);
+				c.fill(); c.stroke();
+			});
+
+			/* ── body ── */
+			c.fillStyle = 'white'; c.strokeStyle = '#555'; c.lineWidth = R * 0.07;
+			c.beginPath(); c.ellipse(cx, bodyCY, bodyRX, bodyRY, 0, 0, Math.PI * 2); c.fill(); c.stroke();
+			c.fillStyle = '#f0f0f0'; c.strokeStyle = 'none';
+			c.beginPath(); c.ellipse(cx, bodyCY + R * 0.1, bodyRX * 0.6, bodyRY * 0.6, 0, 0, Math.PI * 2); c.fill();
+
+			/* ── 2 arms (ON TOP of body, one each side) ── */
+			// Each arm: a single rounded pill, sticking out sideways from mid-body, slightly angled down
+			const armW = R * 0.32, armH = R * 0.52;
+			c.fillStyle = 'white'; c.strokeStyle = '#555'; c.lineWidth = R * 0.07;
+			// Left arm — rotated slightly downward-outward
+			c.save();
+			c.translate(cx - bodyRX * 0.82, bodyCY + R * 0.1);
+			c.rotate(-0.3);
+			c.beginPath(); c.roundRect(-armW / 2, -armH / 2, armW, armH, armW / 2);
+			c.fill(); c.stroke();
+			c.restore();
+			// Right arm
+			c.save();
+			c.translate(cx + bodyRX * 0.82, bodyCY + R * 0.1);
+			c.rotate(0.3);
+			c.beginPath(); c.roundRect(-armW / 2, -armH / 2, armW, armH, armW / 2);
+			c.fill(); c.stroke();
+			c.restore();
+
+			/* ── head (on top of body to cover seam) ── */
+			c.fillStyle = 'white'; c.strokeStyle = '#555'; c.lineWidth = R * 0.07;
+			c.beginPath(); c.arc(cx, headCY, headR, 0, Math.PI * 2); c.fill(); c.stroke();
+
+			/* ── muzzle ── */
+			c.fillStyle = '#ece8e8'; c.strokeStyle = '#ccc'; c.lineWidth = R * 0.05;
+			c.beginPath(); c.ellipse(cx, muzzCY, headR * 0.48, headR * 0.36, 0, 0, Math.PI * 2); c.fill(); c.stroke();
+
+			/* ── nose ── */
+			c.fillStyle = '#2a2a2a'; c.strokeStyle = 'none';
+			c.beginPath(); c.ellipse(cx, headCY + headR * 0.08, headR * 0.18, headR * 0.14, 0, 0, Math.PI * 2); c.fill();
+
+			/* ── eyes ── */
+			[-eyeOX, eyeOX].forEach(function (ox) {
+				c.fillStyle = 'white'; c.strokeStyle = '#444'; c.lineWidth = R * 0.065;
+				c.beginPath(); c.arc(cx + ox, eyeY, eyeR, 0, Math.PI * 2); c.fill(); c.stroke();
+				c.fillStyle = '#111'; c.strokeStyle = 'none';
+				c.beginPath(); c.arc(cx + ox, eyeY + (state === 'sad' ? eyeR * 0.2 : 0), eyeR * 0.65, 0, Math.PI * 2); c.fill();
+				c.fillStyle = 'white';
+				c.beginPath(); c.arc(cx + ox + eyeR * 0.28, eyeY - eyeR * 0.28, eyeR * 0.25, 0, Math.PI * 2); c.fill();
+			});
+
+			/* ── brows & mouth by state ── */
+			c.strokeStyle = '#bbb'; c.lineWidth = R * 0.065; c.lineCap = 'round';
+			if (state === 'happy') {
+				[-eyeOX, eyeOX].forEach(function (ox) {
+					c.beginPath();
+					c.moveTo(cx + ox - R * 0.18, browY + R * 0.04);
+					c.quadraticCurveTo(cx + ox, browY - R * 0.08, cx + ox + R * 0.18, browY + R * 0.04);
+					c.stroke();
+				});
+				c.strokeStyle = '#888'; c.lineWidth = R * 0.08;
+				c.beginPath();
+				c.moveTo(cx - headR * 0.3, muzzCY + R * 0.05);
+				c.quadraticCurveTo(cx, muzzCY + headR * 0.32, cx + headR * 0.3, muzzCY + R * 0.05);
+				c.stroke();
+				c.fillStyle = '#ffb0c8'; c.globalAlpha = 0.45;
+				c.beginPath(); c.ellipse(cx - headR * 0.68, muzzCY - R * 0.02, headR * 0.28, headR * 0.18, 0, 0, Math.PI * 2); c.fill();
+				c.beginPath(); c.ellipse(cx + headR * 0.68, muzzCY - R * 0.02, headR * 0.28, headR * 0.18, 0, 0, Math.PI * 2); c.fill();
+				c.globalAlpha = 1;
+			} else if (state === 'sad') {
+				[-eyeOX, eyeOX].forEach(function (ox, i) {
+					c.beginPath(); const sign = i === 0 ? 1 : -1;
+					c.moveTo(cx + ox - R * 0.18, browY - R * 0.04);
+					c.quadraticCurveTo(cx + ox + sign * R * 0.08, browY + R * 0.08, cx + ox + R * 0.18, browY - R * 0.04);
+					c.stroke();
+				});
+				c.strokeStyle = '#888'; c.lineWidth = R * 0.08;
+				c.beginPath();
+				c.moveTo(cx - headR * 0.3, muzzCY + headR * 0.22);
+				c.quadraticCurveTo(cx, muzzCY + R * 0.04, cx + headR * 0.3, muzzCY + headR * 0.22);
+				c.stroke();
+				c.fillStyle = '#88ccee'; c.globalAlpha = 0.9;
+				[-eyeOX, eyeOX].forEach(function (ox) {
+					c.beginPath(); c.ellipse(cx + ox, eyeY + eyeR * 1.2, eyeR * 0.38, eyeR * 0.7, 0, 0, Math.PI * 2); c.fill();
+					c.beginPath(); c.ellipse(cx + ox, eyeY + eyeR * 2.1, eyeR * 0.28, eyeR * 0.5, 0, 0, Math.PI * 2); c.fill();
+				});
+				c.globalAlpha = 1;
+				c.fillStyle = '#ffaaaa'; c.globalAlpha = 0.36;
+				c.beginPath(); c.ellipse(cx - headR * 0.68, muzzCY - R * 0.02, headR * 0.28, headR * 0.18, 0, 0, Math.PI * 2); c.fill();
+				c.beginPath(); c.ellipse(cx + headR * 0.68, muzzCY - R * 0.02, headR * 0.28, headR * 0.18, 0, 0, Math.PI * 2); c.fill();
+				c.globalAlpha = 1;
+			} else {
+				[-eyeOX, eyeOX].forEach(function (ox) {
+					c.beginPath(); c.moveTo(cx + ox - R * 0.18, browY); c.lineTo(cx + ox + R * 0.18, browY); c.stroke();
+				});
+				c.strokeStyle = '#999'; c.lineWidth = R * 0.07;
+				c.beginPath(); c.moveTo(cx - headR * 0.25, muzzCY + headR * 0.18); c.lineTo(cx + headR * 0.25, muzzCY + headR * 0.18); c.stroke();
+			}
+
+			c.restore();
+		}
+
+		/* ═══════════════════════════════════════════════
+			BEAR'S PERSONAL ICE FLOE
+			Always drawn under the bear.
+			At healthy (t=0): large floe filling center.
+			At critical (t=1): small but never zero — bear always has something to stand on.
+		═══════════════════════════════════════════════ */
+		function drawBearFloe(cx, feetY, R, t, iceTex) {
+			const c = ctx;
+			// floe half-width: lerp from large to a minimum chunk (~1.8*R wide)
+			const floeRX = lerp(R * 4.5, R * 1.8, t);
+			const floeRY = lerp(R * 0.9, R * 0.45, t);
+			const floeCY = feetY + floeRY * 0.4; // floe top sits just below feetY
+
+			c.save();
+
+			// shadow
+			c.globalAlpha = 0.18;
+			c.fillStyle = 'rgba(8,35,75,1)';
+			c.beginPath(); c.ellipse(cx + R * 0.15, floeCY + R * 0.12, floeRX * 0.95, floeRY * 0.85, 0, 0, Math.PI * 2); c.fill();
+			c.globalAlpha = 1;
+
+			// clip to floe shape
+			c.beginPath(); c.ellipse(cx, floeCY, floeRX, floeRY, 0, 0, Math.PI * 2);
+			c.save(); c.clip();
+
+			// ice texture fill
+			if (iceTex) {
+				c.drawImage(iceTex, cx - floeRX, floeCY - floeRY, floeRX * 2, floeRY * 2);
+			} else {
+				c.fillStyle = 'rgb(230,245,252)'; c.fillRect(cx - floeRX, floeCY - floeRY, floeRX * 2, floeRY * 2);
+			}
+
+			// radial highlight
+			const gr = c.createRadialGradient(cx, floeCY - floeRY * 0.3, 0, cx, floeCY, Math.max(floeRX, floeRY));
+			gr.addColorStop(0, 'rgba(255,255,255,0.55)');
+			gr.addColorStop(0.5, 'rgba(255,255,255,0.12)');
+			gr.addColorStop(1, 'rgba(80,150,200,0.18)');
+			c.fillStyle = gr; c.fillRect(cx - floeRX, floeCY - floeRY, floeRX * 2, floeRY * 2);
+			c.restore(); // unclip
+
+			// edge strokes
+			c.beginPath(); c.ellipse(cx, floeCY, floeRX, floeRY, 0, 0, Math.PI * 2);
+			c.strokeStyle = 'rgba(100,170,215,0.55)'; c.lineWidth = clamp(R * 0.06, 1.5, 4); c.stroke();
+			c.strokeStyle = 'rgba(255,255,255,0.40)'; c.lineWidth = clamp(R * 0.03, 0.8, 2); c.stroke();
+
+			// crack lines visible when melting
+			if (t > 0.3) {
+				const crackAlpha = smoothstep(0.3, 0.75, t) * 0.7;
+				c.save(); c.globalAlpha = crackAlpha;
+				c.strokeStyle = 'rgba(100,165,210,0.8)'; c.lineWidth = clamp(R * 0.04, 1, 2.5); c.lineCap = 'round';
+				// left crack
+				c.beginPath();
+				c.moveTo(cx - floeRX * 0.4, floeCY - floeRY * 0.3);
+				c.lineTo(cx - floeRX * 0.15, floeCY + floeRY * 0.1);
+				c.lineTo(cx - floeRX * 0.3, floeCY + floeRY * 0.6);
+				c.stroke();
+				// right crack
+				c.beginPath();
+				c.moveTo(cx + floeRX * 0.3, floeCY - floeRY * 0.2);
+				c.lineTo(cx + floeRX * 0.1, floeCY + floeRY * 0.3);
+				c.stroke();
+				c.restore();
+			}
+
+			c.restore();
+		}
+
+		/* ═══════════════════════════════════════════════
+			MAIN DRAW
+		═══════════════════════════════════════════════ */
+		function draw() {
+			const t = sl.value / 100;
+			const ice = 1 - t;
+			const cold = t < 0.28, hot = t >= 0.6;
+
+			ctx.clearRect(0, 0, W, H);
+
+			/* water background from pre-rendered texture */
+			if (bgWaterCanvas) {
+				ctx.drawImage(bgWaterCanvas, 0, 0, W, H);
+				/* tint overlay: warmer/brighter water when less ice */
+				const warmth = t * 0.35;
+				ctx.fillStyle = `rgba(${Math.round(warmth * 30)},${Math.round(warmth * 15)},0,${warmth * 0.25})`;
+				ctx.fillRect(0, 0, W, H);
+			} else {
+				ctx.fillStyle = '#0f3050'; ctx.fillRect(0, 0, W, H);
+			}
+
+			/* ice sheets */
+			iceSheets.forEach(function (s) { drawSheet(s, ice, bgWaterCanvas, bgIceCanvas); });
+
+			/* floating chunks */
+			floatChunks.forEach(function (c) { drawChunk(c, ice, bgIceCanvas); });
+
+			/* tiny specks */
+			tinyDots.forEach(function (d) { drawDot(d, ice); });
+
+			/* Melt pools (dark water patches in ice when warm) */
+			if (ice < 0.8) {
+				const meltAlpha = smoothstep(0.8, 0.3, ice) * 0.75;
+				ctx.save(); ctx.globalAlpha = meltAlpha;
+				const mpRng = rngFactory(44444);
+				for (let i = 0; i < 8; i++) {
+					const mx = W * (0.2 + mpRng() * 0.6), my = H * (0.2 + mpRng() * 0.6);
+					const mw = (0.04 + mpRng() * 0.10) * W, mh = (0.02 + mpRng() * 0.06) * H;
+					const gr = ctx.createRadialGradient(mx, my, 0, mx, my, Math.max(mw, mh));
+					gr.addColorStop(0, 'rgba(15,55,100,0.90)');
+					gr.addColorStop(0.6, 'rgba(12,45,85,0.70)');
+					gr.addColorStop(1, 'rgba(10,40,75,0)');
+					ctx.fillStyle = gr;
+					ctx.save(); ctx.scale(1, mh / mw);
+					ctx.beginPath(); ctx.arc(mx, my * (mw / mh), mw, 0, Math.PI * 2); ctx.fill();
+					ctx.restore();
+				}
+				ctx.restore();
+			}
+
+			/* Bear + dedicated personal ice floe */
+			const R1 = Math.min(H * 0.38 / 3.0, W * 0.10);
+			const state = cold ? 'happy' : hot ? 'sad' : 'neutral';
+			// Floe sits in lower-centre. Bear feet land on top of it.
+			// floeRY shrinks with t but never disappears.
+			const floeCY = H * 0.72;
+			const floeRY = lerp(R1 * 0.9, R1 * 0.45, t);
+			const feetY = floeCY - floeRY * 0.4;
+			drawBearFloe(W * 0.5, feetY, R1, t, bgIceCanvas);
+			drawBear(W * 0.5, feetY, R1, state);
+
+			/* Status badge */
+			const lh = Math.max(34, H * 0.062), lw = Math.max(190, W * 0.24);
+			const lx = W - lw - W * 0.02, ly = H * 0.03;
+			ctx.fillStyle = 'rgba(255,255,255,0.93)';
+			ctx.strokeStyle = cold ? '#a8ddf5' : hot ? '#f0a080' : '#f0c880';
+			ctx.lineWidth = 2.2;
+			ctx.beginPath(); ctx.roundRect(lx, ly, lw, lh, lh / 2); ctx.fill(); ctx.stroke();
+			ctx.fillStyle = cold ? '#1a7aa0' : hot ? '#c03010' : '#a06020';
+			ctx.font = `bold ${Math.round(lh * 0.46)}px 'Fredoka One',cursive`;
+			ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+			ctx.fillText(cold ? '❄️ Arctic: Healthy' : hot ? '🔥 Arctic: Critical!' : '🌡️ Arctic: Warming…', lx + lw / 2, ly + lh / 2);
+			ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+
+			document.getElementById('sEmoji').textContent = cold ? '🐻‍❄️' : hot ? '😢' : '😟';
+			document.getElementById('sTxt').textContent = cold
+				? 'The Arctic is healthy — polar bears are happy!'
+				: hot ? 'Oh no — the ice is gone! The bears are crying!'
+					: 'The ice is melting… bears are getting worried.';
+		}
+
+		/* ═══════════════════════════════════════════════
+			RESIZE + INIT
+		═══════════════════════════════════════════════ */
+		function resize() {
+			DPR = Math.min(window.devicePixelRatio || 1, 2.5);
+			const scene = canvas.parentElement;
+			W = scene.clientWidth;
+			H = scene.clientHeight;
+
+			/* set physical pixels */
+			canvas.width = Math.round(W * DPR);
+			canvas.height = Math.round(H * DPR);
+			ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+			/* rebuild textures at logical resolution (fast enough) */
+			const texW = Math.round(W), texH = Math.round(H);
+			bgWaterCanvas = buildWaterTexture(texW, texH);
+			bgIceCanvas = buildIceTexture(texW, texH);
+
+			generateScene();
+			draw();
+		}
+
+		sl.addEventListener('input', draw);
+		window.addEventListener('resize', function () {
+			ctx.setTransform(1, 0, 0, 1, 0, 0);
+			resize();
+		});
+		resize();
+	</script>
+</body>
+
+</html>
