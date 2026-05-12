@@ -90,6 +90,37 @@
 			font-size: clamp(14px, 2vw, 18px);
 			color: white;
 		}
+
+		.sound-btns {
+			display: flex;
+			flex-direction: row;
+			gap: 10px;
+			justify-content: flex-end;
+			align-items: center;
+		}
+
+		.sound-btn {
+			width: 30px;
+			height: 30px;
+			border: none;
+			border-radius: 50%;
+			font-size: 15px;
+			cursor: pointer;
+			transition: transform 0.12s, background 0.2s, box-shadow 0.2s;
+			box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+			background: rgba(255,255,255,0.15);
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			line-height: 1;
+		}
+		.sound-btn:hover { transform: scale(1.1); }
+		.sound-btn:active { transform: scale(0.95); }
+		.sound-btn.playing {
+			background: rgba(255,255,255,0.9);
+			box-shadow: 0 0 14px 4px rgba(255,255,255,0.5);
+			transform: scale(1.12);
+		}
 	</style>
 </head>
 
@@ -99,8 +130,13 @@
 		<div class="bottom">
 			<div class="sldr-lbls"><span>❄️ Healthy Ice</span><span>🔥 Melting Ice</span></div>
 			<input type="range" id="sl" min="0" max="100" value="10" step="1" />
-			<div class="status"><span id="sEmoji">🐻‍❄️</span><span id="sTxt">The Arctic is healthy — polar bears are
-					happy!</span></div>
+			<div style="position:relative; display:flex; align-items:center; justify-content:center;">
+				<div class="status"><span id="sEmoji">🐻‍❄️</span><span id="sTxt">The Arctic is healthy — polar bears are happy!</span></div>
+				<div class="sound-btns" style="position:absolute; right:0;">
+					<button class="sound-btn" id="btnWind" onclick="toggleSound('wind')" title="Wind Sound">❄️</button>
+					<button class="sound-btn" id="btnIndustrial" onclick="toggleSound('industrial')" title="Industrial Sound">🏭</button>
+				</div>
+			</div>
 		</div>
 	</div>
 	<script>
@@ -771,6 +807,31 @@
 			resize();
 		});
 		resize();
+	</script>
+	<script>
+		const sounds = {
+			wind: new Audio('WindSound.mp3'),
+			industrial: new Audio('IndustrialSound.mp3')
+		};
+		sounds.wind.loop = true;
+		sounds.industrial.loop = true;
+
+		const playing = { wind: false, industrial: false };
+
+		function toggleSound(key) {
+			const audio = sounds[key];
+			const btn = document.getElementById('btn' + key.charAt(0).toUpperCase() + key.slice(1));
+			if (playing[key]) {
+				audio.pause();
+				audio.currentTime = 0;
+				playing[key] = false;
+				btn.classList.remove('playing');
+			} else {
+				audio.play();
+				playing[key] = true;
+				btn.classList.add('playing');
+			}
+		}
 	</script>
 </body>
 
