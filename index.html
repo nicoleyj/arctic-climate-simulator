@@ -760,17 +760,91 @@
 			drawBear(W * 0.5, feetY, R1, state);
 
 			/* Status badge */
-			const lh = Math.max(34, H * 0.062), lw = Math.max(190, W * 0.24);
+			const lh = Math.max(44, H * 0.075);
+			const lw = Math.max(220, W * 0.26);
 			const lx = W - lw - W * 0.02, ly = H * 0.03;
+
 			ctx.fillStyle = 'rgba(255,255,255,0.93)';
 			ctx.strokeStyle = cold ? '#a8ddf5' : hot ? '#f0a080' : '#f0c880';
-			ctx.lineWidth = 2.2;
+			ctx.lineWidth = 2.5;
 			ctx.beginPath(); ctx.roundRect(lx, ly, lw, lh, lh / 2); ctx.fill(); ctx.stroke();
 			ctx.fillStyle = cold ? '#1a7aa0' : hot ? '#c03010' : '#a06020';
-			ctx.font = `bold ${Math.round(lh * 0.46)}px 'Fredoka One',cursive`;
+			ctx.font = `bold ${Math.round(lh * 0.42)}px 'Fredoka One',cursive`;
 			ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
 			ctx.fillText(cold ? '❄️ Arctic: Healthy' : hot ? '🔥 Arctic: Critical!' : '🌡️ Arctic: Warming…', lx + lw / 2, ly + lh / 2);
 			ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+
+			/* Thermometer — outside badge, to its left */
+			{
+				// mercury colour: cyan-blue → deep red
+				const mr = Math.round(lerp(40, 218, t));
+				const mg = Math.round(lerp(160, 38, t));
+				const mb = Math.round(lerp(220, 38, t));
+				const merc = `rgb(${mr},${mg},${mb})`;
+
+				const bulbR  = lh * 0.30;
+				const tubeW  = bulbR * 0.55;
+				const tubeH  = lh * 1.05;
+				const cx     = lx - bulbR * 3.2;
+				const bulbCY = ly + lh * 0.5 + tubeH * 0.5;
+				const tubeY  = bulbCY - tubeH;
+				const tubeX  = cx - tubeW / 2;
+
+				// outer shell (slightly rounded pill)
+				ctx.fillStyle = 'rgba(255,255,255,0.22)';
+				ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+				ctx.lineWidth = 2;
+				ctx.beginPath();
+				ctx.roundRect(tubeX - 3, tubeY - 3, tubeW + 6, tubeH + 6, (tubeW + 6) / 2);
+				ctx.fill(); ctx.stroke();
+
+				// tube track (dark background)
+				ctx.fillStyle = 'rgba(0,20,50,0.35)';
+				ctx.beginPath();
+				ctx.roundRect(tubeX, tubeY, tubeW, tubeH, tubeW / 2);
+				ctx.fill();
+
+				// mercury fill (clipped to tube) — rises from bottom
+				const fillH = tubeH * 0.92 * t + tubeW * 0.4; // always show a tiny bit
+				ctx.save();
+				ctx.beginPath();
+				ctx.roundRect(tubeX, tubeY, tubeW, tubeH, tubeW / 2);
+				ctx.clip();
+				ctx.fillStyle = merc;
+				ctx.fillRect(tubeX, tubeY + tubeH - fillH, tubeW, fillH);
+				ctx.restore();
+
+				// tick marks (3 evenly spaced)
+				ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+				ctx.lineWidth = 1.5;
+				ctx.lineCap = 'round';
+				for (let i = 1; i <= 3; i++) {
+					const ty = tubeY + tubeH * 0.88 * (1 - i / 4);
+					const half = i === 2 ? tubeW * 1.4 : tubeW * 0.9;
+					ctx.beginPath();
+					ctx.moveTo(cx - half, ty);
+					ctx.lineTo(cx + half, ty);
+					ctx.stroke();
+				}
+
+				// bulb circle
+				ctx.fillStyle = merc;
+				ctx.shadowColor = merc;
+				ctx.shadowBlur = 10;
+				ctx.beginPath(); ctx.arc(cx, bulbCY, bulbR, 0, Math.PI * 2); ctx.fill();
+				ctx.shadowBlur = 0;
+
+				// bulb border
+				ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+				ctx.lineWidth = 2;
+				ctx.beginPath(); ctx.arc(cx, bulbCY, bulbR, 0, Math.PI * 2); ctx.stroke();
+
+				// bulb shine
+				ctx.fillStyle = 'rgba(255,255,255,0.35)';
+				ctx.beginPath();
+				ctx.arc(cx - bulbR * 0.28, bulbCY - bulbR * 0.28, bulbR * 0.32, 0, Math.PI * 2);
+				ctx.fill();
+			}
 
 			document.getElementById('sEmoji').textContent = cold ? '🐻‍❄️' : hot ? '😢' : '😟';
 			document.getElementById('sTxt').textContent = cold
